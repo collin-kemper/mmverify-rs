@@ -35,6 +35,9 @@ const ASCII_9    : u8 = 0x39;
 const ASCII_EQ   : u8 = 0x3d;
 const ASCII_QUESTION_MARK: u8 = 0x3f;
 const ASCII_A    : u8 = 0x41;
+const ASCII_T    : u8 = 0x54;
+const ASCII_U    : u8 = 0x55;
+const ASCII_Y    : u8 = 0x59;
 const ASCII_Z    : u8 = 0x5a;
 const ASCII_LSBR : u8 = 0x5b;
 const ASCII_RSBR : u8 = 0x5d;
@@ -63,8 +66,8 @@ impl TokReader {
   }
 
   fn consume_comment(&mut self) {
-    print!("<comment>");
-    std::io::stdout().flush();
+    // print!("<comment>");
+    // std::io::stdout().flush();
     loop {
       let next_u8 = {
         let buf = self.r.fill_buf().unwrap();
@@ -109,8 +112,8 @@ impl TokReader {
             } else {
               let v = buf[0];
               self.r.consume(1);
-              print!("<${}>", v as char);
-              std::io::stdout().flush();
+              // print!("<${}>", v as char);
+              // std::io::stdout().flush();
               match v {
                 ASCII_LPAR => self.consume_comment(),
                 ASCII_DOT  => return TOK_DOT,
@@ -152,13 +155,13 @@ impl TokReader {
             // }
           },
           ASCII_TAB|ASCII_LF|ASCII_FF|ASCII_CR|ASCII_SP => {
-            print!("{}", ret as char);
-            std::io::stdout().flush();
+            // print!("{}", ret as char);
+            // std::io::stdout().flush();
             return TOK_WSP;
           },
           _ => {
-            print!("{}", ret as char);
-            std::io::stdout().flush();
+            // print!("{}", ret as char);
+            // std::io::stdout().flush();
             return ret;
           },
         }
@@ -232,6 +235,21 @@ impl std::fmt::Display for Hypothesis {
   }
 }
 
+impl Hypothesis {
+  fn to_ss(&self) -> SymStr {
+    match self {
+      Hypothesis::F { t, var } =>
+        SymStr {
+          t: *t,
+          syms: vec![
+            Symbol { t: SymbolType::Var, id: *var }
+          ]
+        },
+      Hypothesis::E(ss) => ss.clone(),
+    }
+  }
+}
+
 struct Assertion {
   hyps: Vec<Hypothesis>,
   consequent: SymStr,
@@ -253,6 +271,10 @@ struct Parser {
 
   // proof state?
   stack:         Vec<SymStr>,
+
+  // DEBUG
+  var_strs: Vec<String>,
+  const_strs: Vec<String>,
 }
 
 impl Parser {
@@ -272,18 +294,38 @@ impl Parser {
       const_count: 0,
 
       stack: Vec::new(),
+
+      // DEBUG
+      var_strs: Vec::new(),
+      const_strs: Vec::new(),
     })
   }
 
+  // DEBUG
+  fn render_ss(&self, ss: &SymStr) -> String {
+    let mut ret = String::new();
+    ret.push_str(self.const_strs[ss.t as usize].as_str());
+    for sym in ss.syms.iter() {
+      ret.push(' ');
+      match sym.t {
+        SymbolType::Var => ret.push_str(self.var_strs[sym.id as usize].as_str()),
+        SymbolType::Const => ret.push_str(self.const_strs[sym.id as usize].as_str()),
+        _ => panic!("invalid"),
+      }
+    }
+    return ret;
+  }
 
-  fn apply(&mut self, assert_id: u32) {
-    let assert = &self.asserts[assert_id as usize];
+
+  fn apply(stack: &mut Vec<SymStr>, assert: &Assertion, disjoint_vars: &HashSet<(u32, u32)>) {
+    // let assert = &self.asserts[assert_id as usize];
     // check to ensure that there are enough statements on the stack to apply assert
-    if self.stack.len() < assert.hyps.len() {
+    if stack.len() < assert.hyps.len() {
       panic!("invalid");
     }
+    // DEBUG
     // println!("<<<\nstack:");
-    // for ss in &self.stack {
+    // for ss in stack.iter() {
     //   println!("\t{}", ss);
     // }
     // println!("assert hyps:");
@@ -295,9 +337,9 @@ impl Parser {
     // construct variable map and check that the stack matches assert's
     // hypotheses
     let mut var_map: HashMap<u32, Vec<Symbol>> = HashMap::new();
-    let hyp_start = self.stack.len() - assert.hyps.len();
+    let hyp_start = stack.len() - assert.hyps.len();
     for i in 0..assert.hyps.len() {
-      let stack_entry = &self.stack[hyp_start + i];
+      let stack_entry = &stack[hyp_start + i];
       match &assert.hyps[i] {
         Hypothesis::F {t, var} => {
           if stack_entry.t != *t {
@@ -351,24 +393,27 @@ impl Parser {
 
     // Then, for every set of variables that must be disjoint, check that
     // their substitutions are disjoint.
+    // println!("<<<disjoint_vars:");
     for (a, b) in &assert.disjoint_vars {
+      // println!("\t({}, {})", a, b);
       for s0 in var_var_map.get(a).unwrap() {
         for s1 in var_var_map.get(b).unwrap() {
           if s0 < s1 {
-            if !self.disjoint_vars.contains(&(*s0, *s1)) {
+            if !disjoint_vars.contains(&(*s0, *s1)) {
               panic!("invalid");
             }
           } else {
-            if !self.disjoint_vars.contains(&(*s1, *s0)) {
+            if !disjoint_vars.contains(&(*s1, *s0)) {
               panic!("invalid");
             }
           }
         }
       }
     }
+    // println!(">>>");
 
     // The application is valid, drop the hypotheses from stack
-    self.stack.truncate(hyp_start);
+    stack.truncate(hyp_start);
 
     // then push the substituted consequent to the stack.
     let mut consequent = SymStr { t: assert.consequent.t, syms: Vec::new() };
@@ -379,7 +424,7 @@ impl Parser {
         consequent.syms.push(sym.clone());
       }
     }
-    self.stack.push(consequent);
+    stack.push(consequent);
   }
 
   fn consume_symbol(&mut self, v: &mut Vec<u8>) {
@@ -429,9 +474,7 @@ impl Parser {
     loop {
       let tok = self.r.next();
       match tok {
-        TOK_EOF => panic!("EOF"),
         TOK_WSP => continue,
-        // TODO: fix
         0x21u8..=0x23u8 | 0x25u8..=0x7eu8 => { /* printable ASCII minus '$' */
           symbol.push(tok);
           self.consume_symbol(&mut symbol);
@@ -494,9 +537,7 @@ impl Parser {
     return id as u32;
   }
 
-  fn create_assert(&mut self, sym_str: SymStr) -> u32 {
-    println!("<<<create_assert");
-    // get vars in consequent and all essential hypotheses
+  fn get_mandatory_vars(&self, sym_str: &SymStr) -> HashSet<u32> {
     let mut vars = HashSet::<u32>::new();
     for sym in &sym_str.syms {
       if sym.t == SymbolType::Var {
@@ -510,27 +551,41 @@ impl Parser {
             vars.insert(sym.id);
           }
         }
-        
       }
     }
 
+    return vars;
+  }
+  fn get_mandatory_hyps(&self, mand_vars: &HashSet<u32>) -> Vec<Hypothesis> {
     let mut hyps = Vec::<Hypothesis>::new();
     for h in &self.hyps {
       match h {
         Hypothesis::F { t:_ , var } =>
-          if vars.contains(var) {
+          if mand_vars.contains(var) {
             hyps.push(h.clone());
           },
         Hypothesis::E(_) => hyps.push(h.clone()),
       }
     }
+    return hyps;
+  }
 
+  fn get_disjoint_vars(&self, mand_vars: &HashSet<u32>) -> Vec<(u32, u32)> {
     let mut disjoint_vars = Vec::<(u32, u32)>::new();
     for (a, b) in &self.disjoint_vars {
-      if vars.contains(a) && vars.contains(b) {
+      if mand_vars.contains(a) && mand_vars.contains(b) {
         disjoint_vars.push((*a, *b));
       }
     }
+    return disjoint_vars;
+  }
+
+  fn create_assert(&mut self, sym_str: SymStr) -> u32 {
+    // println!("<<<create_assert");
+    // get vars in consequent and all essential hypotheses
+    let vars = self.get_mandatory_vars(&sym_str);
+    let hyps = self.get_mandatory_hyps(&vars);
+    let disjoint_vars = self.get_disjoint_vars(&vars);
 
     let assert_id = self.asserts.len();
     self.asserts.push(Assertion {
@@ -549,39 +604,120 @@ impl Parser {
     return self.create_assert(SymStr { t: t, syms: syms });
   }
 
-  fn parse_compressed_proof(&mut self) {
-    /* labels */
-    let mut symbol = Vec::<u8>::with_capacity(256);
+  fn parse_compressed_proof(&mut self, hyps: &Vec<Hypothesis>) {
+    /* get labels */
+    // println!("<hyps.len() {}>", hyps.len());
+    let mut sym_name = Vec::<u8>::new();
+    let mut labels = Vec::<&Symbol>::new();
+    // DEBUG
+    let mut label_strs = Vec::<String>::new();
     loop {
-      match self.r.next() {
-        // TODO: fix
-        TOK_EOF  => panic!("EOF"),
-        TOK_WSP => continue,
-        ASCII_RPAR => break,
-        c        => {
-          symbol.push(c);
-          loop {
-            match self.r.next() {
-              // TODO : fix
-              TOK_EOF  => panic!("EOF"),
-              TOK_WSP => break,
-              c => symbol.push(c),
+      let tok = self.r.next();
+      match tok {
+        TOK_WSP => {
+          if sym_name.len() > 0 {
+            let sym = self.sym_map.get(&sym_name).unwrap();
+            label_strs.push(String::from_utf8(sym_name.clone()).unwrap());
+            sym_name.clear();
+            if sym.t != SymbolType::Hyp && sym.t != SymbolType::Assert {
+              panic!("invalid");
             }
-          }
-          /* TODO: symbol is symbol */
-          symbol.clear();
+            labels.push(sym);
+          }          
         },
+        ASCII_RPAR => {
+          /* end labels */
+          if sym_name.len() != 0 {
+            panic!("invalid");
+          }
+          break;
+        },
+        ASCII_0..=ASCII_9 | ASCII_a..=ASCII_z | ASCII_A..=ASCII_Z | ASCII_DOT | ASCII_DASH | ASCII_UND => sym_name.push(tok),
+        _ => panic!("invalid"),
       }
     }
+    // println!("<--------------------------------------------------->");
+
     /* compressed part */
+    let mut num: usize = 0;
+    // TODO
+    let mut saved_statements = Vec::<SymStr>::new();
     loop {
-      match self.r.next() {
-        TOK_EOF  => panic!("EOF"),
+      let tok = self.r.next();
+      match tok {
         TOK_WSP => continue,
         TOK_DOT => return,
-        c        => {
-          /* TODO */
+        ASCII_A..=ASCII_T => {
+          num = 20 * num;
+          num += (tok - ASCII_A) as usize;
+
+          // mandatory hypothesis
+          if num < hyps.len() {
+            let hyp = &hyps[num];
+            self.stack.push(hyp.to_ss());
+            num = 0;
+            continue;
+          }
+
+          // label
+          num -= hyps.len();
+          if num < labels.len() {
+            // println!("<label {}>", label_strs[num]);
+            let sym = labels[num];
+            match sym.t {
+              SymbolType::Hyp => {
+                let hyp = &self.hyps[sym.id as usize];
+                self.stack.push(hyp.to_ss());
+              },
+              SymbolType::Assert => {
+                let assert = &self.asserts[sym.id as usize];
+                // println!("<<<apply");
+                // for ss in self.stack.iter() {
+                //   println!("\t{}", self.render_ss(ss));
+                // }
+                // println!("hyps:");
+                // for hyp in assert.hyps.iter() {
+                //   println!("\t{}", self.render_ss(&hyp.to_ss()));
+                // }
+                // println!(">>>");
+                Parser::apply(&mut self.stack, assert, &self.disjoint_vars);
+              },
+              _ => unreachable!(),
+            }
+
+            num = 0;
+            continue;
+          }
+
+          // saved statement
+          num -= labels.len();
+          if num < saved_statements.len() {
+            let st = saved_statements[num].clone();
+            // println!("<saved statement {}>", self.render_ss(&st));
+            self.stack.push(st);
+            
+            num = 0;
+            continue;
+          }
+
+          // number too large
+          panic!("invalid");
         },
+        ASCII_U..=ASCII_Y => {
+          num = 5 * num;
+          num = num + (tok - ASCII_U + 1) as usize;
+        },
+        ASCII_Z => {
+          // Save statement from top of stack. Since we generated it once, we
+          // know that it is possible to generate it again, so we don't have
+          // to check the steps to create it a second time.
+          if self.stack.len() == 0 {
+            panic!("invalid");
+          }
+          // println!("<saving statement: {}>", self.render_ss(&self.stack[self.stack.len()-1]));
+          saved_statements.push(self.stack[self.stack.len()-1].clone());
+        },
+        _ => panic!("invalid"),
       }
     }
   }
@@ -622,8 +758,23 @@ impl Parser {
       match tok {
         TOK_WSP => continue,
         ASCII_LPAR => {
-          panic!("unimplemented");
-          self.parse_compressed_proof();
+          /* compressed proof */
+          let vars = self.get_mandatory_vars(&sym_str);
+          let hyps = self.get_mandatory_hyps(&vars);
+
+          self.parse_compressed_proof(&hyps);
+
+          let disjoint_vars = self.get_disjoint_vars(&vars);
+
+          let assert_id = self.asserts.len();
+          self.asserts.push(Assertion {
+            hyps: hyps,
+            consequent: sym_str,
+            disjoint_vars: disjoint_vars,
+          });
+
+          // println!(">>>");
+          return assert_id as u32;
         },
         ASCII_0..=ASCII_9 | ASCII_a..=ASCII_z | ASCII_A..=ASCII_Z | ASCII_DOT
         | ASCII_DASH | ASCII_UND => {
@@ -653,16 +804,11 @@ impl Parser {
           match sym.t {
             SymbolType::Hyp => {
               let hyp = &self.hyps[sym.id as usize];
-              match hyp {
-                Hypothesis::F { t, var } => self.stack.push(
-                  SymStr { t: *t,
-                    syms: vec![
-                      Symbol { t: SymbolType::Var, id: *var } ] }),
-                Hypothesis::E(ss) => self.stack.push(ss.clone()),
-              }
+              self.stack.push(hyp.to_ss());
             },
             SymbolType::Assert => {
-              self.apply(sym.id);
+              let assert = &self.asserts[sym.id as usize];
+              Parser::apply(&mut self.stack, assert, &self.disjoint_vars);
             },
             _ => panic!("invalid"),
           }
@@ -709,6 +855,9 @@ impl Parser {
             if self.sym_map.insert(symbol.clone(), Symbol { t: SymbolType::Const, id: id }).is_some() {
               panic!("invalid");
             }
+            // DEBUG
+            self.const_strs.push(String::from_utf8(symbol.clone()).unwrap());
+
             self.const_count += 1;
             symbol.clear();
           }
@@ -731,6 +880,9 @@ impl Parser {
             if self.sym_map.insert(symbol.clone(), Symbol { t: SymbolType::Var, id: id }).is_some() {
               panic!("invalid");
             }
+            // DEBUG
+            self.var_strs.push(String::from_utf8(symbol.clone()).unwrap());
+
             self.scope_local_names.insert(symbol.clone());
             self.var_count += 1;
             symbol.clear();
@@ -764,6 +916,7 @@ impl Parser {
             if sym.t != SymbolType::Var {
               panic!("invalid");
             }
+            // println!("<sym.id {} symbol {}>", sym.id, String::from_utf8(symbol.clone()).unwrap());
             symbols.push(sym.id);
             symbol.clear();
           }
@@ -773,12 +926,14 @@ impl Parser {
       }
     }
     // println!("symbols.len() = {}", symbols.len());
+    // println!("<symbols {:?}>", symbols);
     if symbols.len() > 1 {
       for i in 0..symbols.len()-1 {
-        for j in i..symbols.len() {
+        for j in i+1..symbols.len() {
           /* TODO: symbols[i] symbols[j] are disjoint */
           let sym_i = symbols[i];
           let sym_j = symbols[j];
+          // println!("<sym_i {} sym_j {}>", sym_i, sym_j);
           // TODO: is this correct?
           // if sym_i == sym_j {
           //   panic!("invalid");
