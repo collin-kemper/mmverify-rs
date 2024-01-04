@@ -40,7 +40,7 @@ const ASCII_U    : u8 = 0x55;
 const ASCII_Y    : u8 = 0x59;
 const ASCII_Z    : u8 = 0x5a;
 const ASCII_LSBR : u8 = 0x5b;
-const ASCII_RSBR : u8 = 0x5d;
+// const ASCII_RSBR : u8 = 0x5d;
 const ASCII_UND  : u8 = 0x5f;
 const ASCII_a    : u8 = 0x61;
 const ASCII_c    : u8 = 0x63;
@@ -192,24 +192,6 @@ struct SymStr {
   syms: Vec<Symbol>,
 }
 
-// DEBUG
-impl std::fmt::Display for SymStr {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "t: {: <2}", self.t)?;
-    for sym in &self.syms {
-      let t = match sym.t {
-        SymbolType::Var => 'v',
-        SymbolType::Const => 'c',
-        SymbolType::Hyp => 'h',
-        SymbolType::Assert => 'a',
-      };
-      write!(f, " {: >2}{}", sym.id, t)?;
-    }
-    Ok(())
-  }
-}
-
-
 impl SymStr {
   fn new(t: u32) -> SymStr {
     return SymStr {
@@ -223,16 +205,6 @@ impl SymStr {
 enum Hypothesis {
   F { t: u32, var: u32 },
   E(SymStr),
-}
-
-// DEBUG
-impl std::fmt::Display for Hypothesis {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    match self {
-      Hypothesis::F { t, var } => write!(f, "F: t {} {}v", t, var),
-      Hypothesis::E(ss) => write!(f, "E: {}", ss),
-    }
-  }
 }
 
 impl Hypothesis {
@@ -271,10 +243,6 @@ struct Parser {
 
   // proof state?
   stack:         Vec<SymStr>,
-
-  // DEBUG
-  var_strs: Vec<String>,
-  const_strs: Vec<String>,
 }
 
 impl Parser {
@@ -294,28 +262,8 @@ impl Parser {
       const_count: 0,
 
       stack: Vec::new(),
-
-      // DEBUG
-      var_strs: Vec::new(),
-      const_strs: Vec::new(),
     })
   }
-
-  // DEBUG
-  fn render_ss(&self, ss: &SymStr) -> String {
-    let mut ret = String::new();
-    ret.push_str(self.const_strs[ss.t as usize].as_str());
-    for sym in ss.syms.iter() {
-      ret.push(' ');
-      match sym.t {
-        SymbolType::Var => ret.push_str(self.var_strs[sym.id as usize].as_str()),
-        SymbolType::Const => ret.push_str(self.const_strs[sym.id as usize].as_str()),
-        _ => panic!("invalid"),
-      }
-    }
-    return ret;
-  }
-
 
   fn apply(stack: &mut Vec<SymStr>, assert: &Assertion, disjoint_vars: &HashSet<(u32, u32)>) {
     // let assert = &self.asserts[assert_id as usize];
@@ -323,16 +271,6 @@ impl Parser {
     if stack.len() < assert.hyps.len() {
       panic!("invalid");
     }
-    // DEBUG
-    // println!("<<<\nstack:");
-    // for ss in stack.iter() {
-    //   println!("\t{}", ss);
-    // }
-    // println!("assert hyps:");
-    // for h in &assert.hyps {
-    //   println!("\t{}", h);
-    // }
-    // println!(">>>");
 
     // construct variable map and check that the stack matches assert's
     // hypotheses
@@ -609,15 +547,12 @@ impl Parser {
     // println!("<hyps.len() {}>", hyps.len());
     let mut sym_name = Vec::<u8>::new();
     let mut labels = Vec::<&Symbol>::new();
-    // DEBUG
-    let mut label_strs = Vec::<String>::new();
     loop {
       let tok = self.r.next();
       match tok {
         TOK_WSP => {
           if sym_name.len() > 0 {
             let sym = self.sym_map.get(&sym_name).unwrap();
-            label_strs.push(String::from_utf8(sym_name.clone()).unwrap());
             sym_name.clear();
             if sym.t != SymbolType::Hyp && sym.t != SymbolType::Assert {
               panic!("invalid");
@@ -662,7 +597,6 @@ impl Parser {
           // label
           num -= hyps.len();
           if num < labels.len() {
-            // println!("<label {}>", label_strs[num]);
             let sym = labels[num];
             match sym.t {
               SymbolType::Hyp => {
@@ -671,15 +605,6 @@ impl Parser {
               },
               SymbolType::Assert => {
                 let assert = &self.asserts[sym.id as usize];
-                // println!("<<<apply");
-                // for ss in self.stack.iter() {
-                //   println!("\t{}", self.render_ss(ss));
-                // }
-                // println!("hyps:");
-                // for hyp in assert.hyps.iter() {
-                //   println!("\t{}", self.render_ss(&hyp.to_ss()));
-                // }
-                // println!(">>>");
                 Parser::apply(&mut self.stack, assert, &self.disjoint_vars);
               },
               _ => unreachable!(),
@@ -855,9 +780,6 @@ impl Parser {
             if self.sym_map.insert(symbol.clone(), Symbol { t: SymbolType::Const, id: id }).is_some() {
               panic!("invalid");
             }
-            // DEBUG
-            self.const_strs.push(String::from_utf8(symbol.clone()).unwrap());
-
             self.const_count += 1;
             symbol.clear();
           }
@@ -880,9 +802,6 @@ impl Parser {
             if self.sym_map.insert(symbol.clone(), Symbol { t: SymbolType::Var, id: id }).is_some() {
               panic!("invalid");
             }
-            // DEBUG
-            self.var_strs.push(String::from_utf8(symbol.clone()).unwrap());
-
             self.scope_local_names.insert(symbol.clone());
             self.var_count += 1;
             symbol.clear();
@@ -953,8 +872,6 @@ impl Parser {
 
     let mut label = Vec::<u8>::with_capacity(256);
 
-    let mut block_symbols = Vec::<u32>::new();
-    let mut block_sizes = Vec::<usize>::new();
     let mut scope_local_names_stack = Vec::<HashSet<Vec<u8>>>::new();
     let mut hyps_len_stack = Vec::<usize>::new();
     let mut disjoint_vars_stack = Vec::<HashSet<(u32, u32)>>::new();
