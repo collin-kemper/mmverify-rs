@@ -1,6 +1,10 @@
 # mmverify-rs
 
-`mmverify-rs` is a verifier for [Metamath](https://us.metamath.org/). Metamath is a language defining formal systems and specifying proofs within those formal systems.
+`mmverify-rs` is currently a verifier for [Metamath](https://us.metamath.org/). However, work is ongoing to make it something more. 😉
+
+## Background
+
+Metamath is a language defining formal systems and specifying proofs within those formal systems.
 
 `mmverify-rs` is one of [many](https://us.metamath.org/other.html#verifiers) verifiers for Metamath. It is somewhat more complicated than the simplest verifiers, such as [mmverify.py](https://github.com/david-a-wheeler/mmverify.py) (~800 lines of Rust vs. ~500 lines of Python), but is also notably faster (~3 seconds vs. ~22 seconds to verify `set.mm` on my machine). It is slower and has less features than fastest verifiers, such as [metamath-knife](https://github.com/metamath/metamath-knife) (~3 seconds vs. ~0.7 seconds to verify `set.mm` with a single thread on my machine), but is also much simpler (~800 lines of Rust vs. ~12,500 lines of Rust).
 
