@@ -581,7 +581,13 @@ impl Parser {
       let tok = self.r.next();
       match tok {
         TOK_WSP => continue,
-        TOK_DOT => return,
+        TOK_DOT => {
+          /* end of proof */
+          if num != 0 {
+            panic!("invalid");
+          }
+          return;
+        },
         ASCII_A..=ASCII_T => {
           num = 20 * num;
           num += (tok - ASCII_A) as usize;
@@ -688,6 +694,23 @@ impl Parser {
           let hyps = self.get_mandatory_hyps(&vars);
 
           self.parse_compressed_proof(&hyps);
+
+          // check that proof generated correct output
+          if self.stack.len() != 1 {
+            panic!("invalid");
+          }
+          // check that top of stack is same as assertion, then create assertion
+          if sym_str.syms.len() != self.stack[0].syms.len() {
+            panic!("invalid");
+          }
+          if sym_str.t != self.stack[0].t {
+            panic!("invalid");
+          }
+          for i in 0..sym_str.syms.len() {
+            if sym_str.syms[i] != self.stack[0].syms[i] {
+              panic!("invalid");
+            }
+          }
 
           let disjoint_vars = self.get_disjoint_vars(&vars);
 
