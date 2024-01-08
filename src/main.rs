@@ -229,8 +229,13 @@ impl Hypothesis {
 enum ProofStep {
   Hyp(u32),
   Dep(u32),
-  SaveDep(u32), // dependency + save to saved stack
   Saved(u32),
+}
+
+// This is more thorough data about the mechanics of a proof step.
+struct StepData {
+  start_step: u32,
+  // what I did
 }
 
 struct Assertion {
@@ -605,37 +610,21 @@ impl Parser {
             SymbolType::Assert => {
               let assert = &self.asserts[sym.id as usize];
               Parser::apply(&mut stack, assert, disjoint_vars);
+              saved_statements.push(stack[stack.len()-1].clone());
             },
             _ => unreachable!(),
           }
-        },
-        ProofStep::SaveDep(id) => {
-          let sym = &deps[*id as usize];
-          match sym.t {
-            SymbolType::Hyp => {
-              let hyp = &self.hyps[sym.id as usize];
-              stack.push(hyp.to_ss());
-            },
-            SymbolType::Assert => {
-              let assert = &self.asserts[sym.id as usize];
-              Parser::apply(&mut stack, assert, disjoint_vars);
-            },
-            _ => unreachable!(),
-          }
-          saved_statements.push(stack[stack.len()-1].clone());
         },
         ProofStep::Saved(id) => {
           let st = saved_statements[*id as usize].clone();
           // println!("<saved statement {}>", self.render_ss(&st));
           stack.push(st);
-          
         },
       }
     }
 
     // check that top of stack matches consequent
     if stack.len() != 1 {
-      println!("stack.len(): {}", stack.len());
       panic!("invalid");
       return false;
     }
@@ -662,10 +651,10 @@ impl Parser {
     let mut opt_vars = HashSet::<u32>::new();
     let hyps = self.get_mandatory_hyps(&mand_vars);
 
-    println!("$( verifying {}:", name);
-    for (a, b) in self.disjoint_vars.iter() {
-      println!("\t$d {} {} $.", self.vars[*a as usize].name, self.vars[*b as usize].name);
-    }
+    // println!("$( verifying {}:", name);
+    // for (a, b) in self.disjoint_vars.iter() {
+    //   println!("\t$d {} {} $.", self.vars[*a as usize].name, self.vars[*b as usize].name);
+    // }
 
     /* get labels */
     let mut sym_name = Vec::<u8>::new();
@@ -686,6 +675,8 @@ impl Parser {
               if let Hypothesis::F { t , var } = self.hyps[sym.id as usize] {
                 opt_vars.insert(var);
               }
+            } else if sym.t == SymbolType::Assert {
+              // println!("\t{}", self.asserts[sym.id as usize].name);
             }
             labels.push(sym.clone());
           }          
@@ -702,34 +693,38 @@ impl Parser {
       }
     }
 
-    print!("mand vars:");
-    for var in mand_vars.iter() {
-      print!(" {}", self.vars[*var as usize].name);
-    }
-    println!("");
+    // print!("mand vars:");
+    // for var in mand_vars.iter() {
+    //   print!(" {}", self.vars[*var as usize].name);
+    // }
+    // println!("");
 
-    print!("opt vars:");
-    for var in opt_vars.iter() {
-      print!(" {}", self.vars[*var as usize].name);
-    }
-    println!("");
+    // print!("opt vars:");
+    // for var in opt_vars.iter() {
+    //   print!(" {}", self.vars[*var as usize].name);
+    // }
+    // println!("");
 
     // construct proof
     let mut proof = Vec::<ProofStep>::new();
+    let mut saved_inds = Vec::<u32>::new();
     let mut saved_statement_count = 0;
     let mut num: usize = 0;
+    let mut step_num = 0;
     loop {
       let tok = self.r.next();
       match tok {
         TOK_WSP => continue,
         TOK_DOT => break,
         ASCII_A..=ASCII_T => {
+          step_num += 1;
           num = 20 * num;
           num += (tok - ASCII_A) as usize;
-          // print!(" {}", num);
+          // print!("\t{}: ({})", step_num, num);
 
           // mandatory hypothesis
           if num < hyps.len() {
+            // println!(" hyp");
             proof.push(ProofStep::Hyp(num as u32));
 
             num = 0;
@@ -740,6 +735,12 @@ impl Parser {
           num -= hyps.len();
           if num < labels.len() {
             proof.push(ProofStep::Dep(num as u32));
+            if labels[num].t == SymbolType::Assert {
+              saved_statement_count += 1;
+              // println!(" label {}", self.asserts[labels[num].id as usize].name);
+            } else {
+              // println!(" label");
+            }
 
             num = 0;
             continue;
@@ -748,7 +749,8 @@ impl Parser {
           // saved statement
           num -= labels.len();
           if num < saved_statement_count {
-            proof.push(ProofStep::Saved(num as u32));
+            // println!("saved {} ({})", num, saved_inds[num]);
+            proof.push(ProofStep::Saved(saved_inds[num]));
 
             num = 0;
             continue;
@@ -765,24 +767,21 @@ impl Parser {
           if proof.len() == 0 {
             panic!("invalid");
           }
-          match proof.pop().unwrap() {
-            ProofStep::Dep(id) => proof.push(ProofStep::SaveDep(id)),
-            _ => panic!("invalid"),
-          } 
-          saved_statement_count += 1;
+          // println!("\tsaving {} as {}", saved_statement_count-1, saved_inds.len());
+          saved_inds.push((saved_statement_count - 1) as u32);
         },
         _ => panic!("invalid"),
       }
     }
 
-    println!("\n$)");
+    // println!("\n$)");
 
     let disjoint_vars = self.get_disjoint_vars(&mand_vars);
     if self.is_valid_proof(&consequent, &hyps, &self.disjoint_vars, &labels, &proof) {
       let mut opt_disjoint_vars = Vec::<(u32, u32)>::new();
       // let mut all_vars = mand_vars.clone();
       // all_vars.union(&opt_vars);
-      print!("$( opt disjoint vars:");
+      // print!("$( opt disjoint vars:");
       // print!("all vars:");
       // for var in all_vars.iter() {
       //   print!(" {}", self.vars[*var as usize].name);
@@ -790,9 +789,9 @@ impl Parser {
       // println!("");
       for a in mand_vars.union(&opt_vars) {
         for b in opt_vars.iter() {
-          println!("checking {}({}) {}({})",
-            self.vars[*a as usize].name, *a,
-            self.vars[*b as usize].name, *b);
+          // println!("checking {}({}) {}({})",
+            // self.vars[*a as usize].name, *a,
+            // self.vars[*b as usize].name, *b);
           if a <= b {
             let pair = (*a, *b);
             if self.disjoint_vars.get(&pair).is_some() {
@@ -807,16 +806,16 @@ impl Parser {
         }
       }
 
-      for (a, b) in opt_disjoint_vars.iter() {
-        print!(" ({}, {})",
-          self.vars[*a as usize].name,
-          self.vars[*b as usize].name,
-        );
-      }
-      println!("opt_disjoint_vars.len() {} disjoint_vars.len() {}",
-        opt_disjoint_vars.len(), disjoint_vars.len()
-      );
-      println!(" $)");
+      // for (a, b) in opt_disjoint_vars.iter() {
+      //   print!(" ({}, {})",
+      //     self.vars[*a as usize].name,
+      //     self.vars[*b as usize].name,
+      //   );
+      // }
+      // println!("opt_disjoint_vars.len() {} disjoint_vars.len() {}",
+      //   opt_disjoint_vars.len(), disjoint_vars.len()
+      // );
+      // println!(" $)");
 
       let assert_id = self.asserts.len();
       self.asserts.push(Assertion {
@@ -1276,6 +1275,34 @@ impl Parser {
 
         let hyps_len = assert.hyps.len() as u32;
         let deps_len = assert.depends.len() as u32;
+
+        let mut depended_on = Vec::<bool>::new();
+        for step in assert.proof.iter() {
+          match step {
+            ProofStep::Dep(id) => {
+              if assert.depends[*id as usize].t == SymbolType::Assert {
+                depended_on.push(false);
+              }
+            },
+            ProofStep::Saved(id) => {
+              depended_on[*id as usize] = true;
+            },
+            _ => {},
+          }
+        }
+        let mut saved_id_to_num = Vec::<u32>::new();
+        let mut dep_cnt = 0;
+        for dep in depended_on.iter() {
+          if *dep {
+            saved_id_to_num.push(dep_cnt + hyps_len + deps_len);
+            dep_cnt += 1;
+          } else {
+            saved_id_to_num.push(0);
+          }
+        }
+
+
+        let mut assert_cnt = 0;
         for step in assert.proof.iter() {
           match step {
             ProofStep::Hyp(id) => {
@@ -1283,21 +1310,163 @@ impl Parser {
             },
             ProofStep::Dep(id) => {
               print!("{}", Parser::num_to_mm_enc(*id + hyps_len));
+              if assert.depends[*id as usize].t == SymbolType::Assert {
+                if depended_on[assert_cnt] {
+                  print!("Z");
+                }
+                assert_cnt += 1;
+              }
             },
-            ProofStep::SaveDep(id) => {
-              print!("{}", Parser::num_to_mm_enc(*id + hyps_len));
-              print!("Z");
-            },
+            // ProofStep::SaveDep(id) => {
+            //   print!("{}", Parser::num_to_mm_enc(*id + hyps_len));
+            //   print!("Z");
+            // },
             ProofStep::Saved(id) => {
-              print!("{}", Parser::num_to_mm_enc(*id + hyps_len + deps_len));
+              print!("{}", Parser::num_to_mm_enc(saved_id_to_num[*id as usize]));
             },
           }
         }
 
-        // proof
         println!(" $.");
       }
       println!("$}}");
+    }
+  }
+
+
+  // fn integrate() {
+  //   let mut stack = Vec::<SymStr>::new();
+  //   let mut formulas = Vec::<SymStr>::new();
+  //   let mut steps = Vec::<StepData>::new();
+
+  //   for step in proof {
+  //     match step {
+  //       ProofStep::Hyp(id) => {
+  //         // println!("h");
+  //         let hyp = &hyps[*id as usize];
+  //         stack.push(hyp.to_ss());
+  //       },
+  //       ProofStep::Dep(id) => {
+  //         // println!("d");
+  //         let sym = &deps[*id as usize];
+  //         match sym.t {
+  //           SymbolType::Hyp => {
+  //             let hyp = &self.hyps[sym.id as usize];
+  //             stack.push(hyp.to_ss());
+  //           },
+  //           SymbolType::Assert => {
+  //             let assert = &self.asserts[sym.id as usize];
+  //             Parser::apply(&mut stack, assert, disjoint_vars);
+  //           },
+  //           _ => unreachable!(),
+  //         }
+  //         formulas.push(stack[stack.len()-1].clone());
+  //       },
+  //       ProofStep::Saved(id) => {
+  //         let st = saved_statements[*id as usize].clone();
+  //         // println!("<saved statement {}>", self.render_ss(&st));
+  //         stack.push(st);
+          
+  //       },
+  //     }
+  //   }
+  //   for i in (0..steps.len()).rev() {
+  //     // if this step is a dep, and I've seen it before, save it.
+  //     // if I've seen this ste
+      
+  //   }
+    
+  // }
+
+  // fn canonicalize(&self, consequent: &SymStr, hyps: &Vec<Hypothesis>,
+  //     disjoint_vars: &HashSet<(u32, u32)>, deps: &Vec<Symbol>, proof: &Vec<ProofStep>) -> bool {
+  //   let mut stack = Vec::<SymStr>::new();
+  //   let mut saved_statements = Vec::<SymStr>::new();
+
+  //   let mut creations = HashMap::<SymStr, u32>::new();
+
+  //   for step in proof {
+  //     match step {
+  //       ProofStep::Hyp(id) => {
+  //         // println!("h");
+  //         let hyp = &hyps[*id as usize];
+  //         stack.push(hyp.to_ss());
+  //       },
+  //       ProofStep::Dep(id) => {
+  //         // println!("d");
+  //         if self.asserts[id as usize].is_axiom {
+  //           // fine
+  //         } else {
+  //           // we need to reduce.
+  //           // go backwards through the steps of the sub-proof.
+  //           // if the step exists, skip it and and all sub-steps,
+  //           // and instead it will become a saved step.
+  //         }
+  //         // let sym = &deps[*id as usize];
+  //         // match sym.t {
+  //         //   SymbolType::Hyp => {
+  //         //     let hyp = &self.hyps[sym.id as usize];
+  //         //     stack.push(hyp.to_ss());
+  //         //   },
+  //         //   SymbolType::Assert => {
+  //         //     let assert = &self.asserts[sym.id as usize];
+  //         //     Parser::apply(&mut stack, assert, disjoint_vars);
+  //         //   },
+  //         //   _ => unreachable!(),
+  //         // }
+  //       },
+  //       ProofStep::SaveDep(id) => {
+  //         // let sym = &deps[*id as usize];
+  //         // match sym.t {
+  //         //   SymbolType::Hyp => {
+  //         //     let hyp = &self.hyps[sym.id as usize];
+  //         //     stack.push(hyp.to_ss());
+  //         //   },
+  //         //   SymbolType::Assert => {
+  //         //     let assert = &self.asserts[sym.id as usize];
+  //         //     Parser::apply(&mut stack, assert, disjoint_vars);
+  //         //   },
+  //         //   _ => unreachable!(),
+  //         // }
+  //         // saved_statements.push(stack[stack.len()-1].clone());
+  //       },
+  //       ProofStep::Saved(id) => {
+  //         let st = saved_statements[*id as usize].clone();
+  //         // println!("<saved statement {}>", self.render_ss(&st));
+  //         stack.push(st);
+          
+  //       },
+  //     }
+  //   }
+
+  //   // check that top of stack matches consequent
+  //   if stack.len() != 1 {
+  //     println!("stack.len(): {}", stack.len());
+  //     panic!("invalid");
+  //     return false;
+  //   }
+  //   // check that top of stack is same as assertion, then create assertion
+  //   if consequent.syms.len() != stack[0].syms.len() {
+  //     panic!("invalid");
+  //     return false;
+  //   }
+  //   if consequent.t != stack[0].t {
+  //     panic!("invalid");
+  //     return false;
+  //   }
+  //   for i in 0..consequent.syms.len() {
+  //     if consequent.syms[i] != stack[0].syms[i] {
+  //       panic!("invalid");
+  //       return false;
+  //     }
+  //   }
+  //   return true;
+  // }
+
+  fn canonicalize_proofs(&mut self) {
+    for assert in self.asserts.iter() {
+      // go through the proof. If 
+      
     }
   }
 }
