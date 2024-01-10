@@ -6,6 +6,7 @@ use std::io::prelude::*;
 use std::io::BufReader;
 
 // use num::{ BigUint, Zero, One };
+use rand::prelude::*;
 
 /* -------------- tokens --------------- */
 const TOK_EOF      : u8 = 0x00; /* end of file */
@@ -173,19 +174,25 @@ impl SymStr {
 }
 
 #[derive(Clone)]
+struct VarDecl {
+  t: u32,
+  var: u32,
+}
+
+#[derive(Clone)]
 enum Hypothesis {
-  F { t: u32, var: u32 },
+  F(VarDecl),
   E(SymStr),
 }
 
 impl Hypothesis {
   fn to_ss(&self) -> SymStr {
     match self {
-      Hypothesis::F { t, var } =>
+      Hypothesis::F(decl) =>
         SymStr {
-          t: *t,
+          t: decl.t,
           syms: vec![
-            Symbol { t: SymbolType::Var, id: *var }
+            Symbol { t: SymbolType::Var, id: decl.var }
           ]
         },
       Hypothesis::E(ss) => ss.clone(),
@@ -212,6 +219,7 @@ enum ProofStep {
 //   // what I did
 // }
 
+#[derive(Clone)]
 struct Assertion {
   name: String,
   is_axiom: bool,
@@ -221,13 +229,17 @@ struct Assertion {
   disjoint_vars: Vec<(u32, u32)>,
   consequent: SymStr,
 
+  mand_vars: Vec<u32>,
+  opt_vars: Vec<u32>,
+
   depends: Vec<Symbol>,
-  opt_disjoint_vars: Vec<(u32, u32)>, // needed for proof
+  // opt_disjoint_vars: Vec<(u32, u32)>, // needed for proof
   proof: Vec<ProofStep>,
 }
 
 struct Var {
   name: String,
+  t: u32, // type id
 }
 
 struct Const {
@@ -270,8 +282,17 @@ impl Parser {
     })
   }
 
-  fn apply(stack: &mut Vec<SymStr>, assert: &Assertion, disjoint_vars: &HashSet<(u32, u32)>) {
-    // let assert = &self.asserts[assert_id as usize];
+  /**NOTE: we assume that all optional variables are disjoint.
+   */
+  /**Apply an assertion to the stack. This will pop off hypotheses for the
+   * assertion and then push the assertion (with the necessary variable
+   * substitutions) to the stack. It will also check that the disjoint requirements
+   * of the assertion are maintained, and perform necessary type and match checking
+   * for the hypotheses.
+   */
+  fn apply(stack: &mut Vec<SymStr>, assert: &Assertion,
+    mand_vars: &HashSet<u32>,
+    disjoint_vars: &HashSet<(u32, u32)>) {
     // check to ensure that there are enough statements on the stack to apply assert
     if stack.len() < assert.hyps.len() {
       panic!("invalid");
@@ -279,24 +300,25 @@ impl Parser {
 
     // construct variable map and check that the stack matches assert's
     // hypotheses
-    let mut var_map: HashMap<u32, Vec<Symbol>> = HashMap::new();
+    let mut var_map: HashMap<u32, &Vec<Symbol>> = HashMap::new();
     let hyp_start = stack.len() - assert.hyps.len();
     for i in 0..assert.hyps.len() {
       let stack_entry = &stack[hyp_start + i];
       match &assert.hyps[i] {
-        Hypothesis::F {t, var} => {
-          if stack_entry.t != *t {
+        Hypothesis::F(decl) => {
+          if stack_entry.t != decl.t {
             panic!("invalid");
           }
-          var_map.insert(*var, stack_entry.syms.clone());
+          var_map.insert(decl.var, &stack_entry.syms);
         },
         Hypothesis::E (ss)     => {
           if stack_entry.t != ss.t {
             panic!("invalid");
           }
 
+          // TODO: unnecessary allocation
           let mut ss_sub = Vec::<Symbol>::new();
-          for sym in &ss.syms {
+          for sym in ss.syms.iter() {
             if sym.t == SymbolType::Var {
               let sub = var_map.get(&sym.id).unwrap();
               ss_sub.extend_from_slice(sub.as_slice());
@@ -321,9 +343,15 @@ impl Parser {
     // first, construct map of variables to variables used in substitutions
     let mut var_var_map = HashMap::<u32, Vec<u32>>::new();
     let mut var_set = HashSet::<u32>::new();
-    for (v, ss) in var_map.iter() {
-      for s in ss {
+    for (v, syms) in var_map.iter() {
+      if !mand_vars.contains(v) {
+        continue;
+      }
+      for s in syms {
         if s.t == SymbolType::Var {
+          if !mand_vars.contains(s.id) {
+            continue;
+          }
           var_set.insert(s.id);
         }
       }
@@ -445,7 +473,7 @@ impl Parser {
     let var = self.get_variable();
     self.consume_tok_dot();
     let id = self.hyps.len();
-    self.hyps.push(Hypothesis::F{ t, var });
+    self.hyps.push(Hypothesis::F(VarDecl{ t, var }));
     self.hyp_names.push(name);
     self.in_scope_hyps.push(id as u32);
     return id as u32;
@@ -507,8 +535,8 @@ impl Parser {
     for id in self.in_scope_hyps.iter() {
       let h = &self.hyps[*id as usize];
       match h {
-        Hypothesis::F { t:_ , var } =>
-          if mand_vars.contains(var) {
+        Hypothesis::F (decl) =>
+          if mand_vars.contains(&decl.var) {
             hyps.push(h.clone());
           },
         Hypothesis::E(_) => hyps.push(h.clone()),
@@ -525,8 +553,8 @@ impl Parser {
       let h = &self.hyps[*id as usize];
       let name = &self.hyp_names[*id as usize];
       match h {
-        Hypothesis::F { t:_ , var } =>
-          if mand_vars.contains(var) {
+        Hypothesis::F(decl) =>
+          if mand_vars.contains(&decl.var) {
             map.insert(name.clone(), ProofStep::Hyp(mand_hyp_count));
             mand_hyp_count += 1;
           },
@@ -572,10 +600,14 @@ impl Parser {
     return assert_id as u32;
   }
 
+  /**NOTE: this 'should' return bool, but it is a lot easier to trace and debug stuff
+   * if you just panic.
+   */
   fn is_valid_proof(&self, consequent: &SymStr, hyps: &Vec<Hypothesis>,
-      disjoint_vars: &HashSet<(u32, u32)>, deps: &Vec<Symbol>, proof: &Vec<ProofStep>) -> bool {
+      disjoint_vars: &HashSet<(u32, u32)>, deps: &Vec<Symbol>, proof: &Vec<ProofStep>) {
     let mut stack = Vec::<SymStr>::new();
     let mut saved_statements = Vec::<SymStr>::new();
+    let mand_vars = self.get_mandatory_vars(consequent);
 
     for step in proof {
       match step {
@@ -592,7 +624,7 @@ impl Parser {
             },
             SymbolType::Assert => {
               let assert = &self.asserts[sym.id as usize];
-              Parser::apply(&mut stack, assert, disjoint_vars);
+              Parser::apply(&mut stack, assert, mand_vars, disjoint_vars);
               saved_statements.push(stack[stack.len()-1].clone());
             },
             _ => panic!("invalid"),
@@ -608,24 +640,20 @@ impl Parser {
     // check that top of stack matches consequent
     if stack.len() != 1 {
       panic!("invalid");
-      return false;
     }
     // check that top of stack is same as assertion, then create assertion
     if consequent.syms.len() != stack[0].syms.len() {
       panic!("invalid");
-      return false;
     }
     if consequent.t != stack[0].t {
       panic!("invalid");
-      return false;
     }
     for i in 0..consequent.syms.len() {
       if consequent.syms[i] != stack[0].syms[i] {
         panic!("invalid");
-        return false;
       }
     }
-    return true;
+    return;
   }
 
   fn parse_compressed_proof(&mut self, name: String, consequent: SymStr) -> u32 {
@@ -647,8 +675,8 @@ impl Parser {
               panic!("invalid");
             }
             if sym.t == SymbolType::Hyp {
-              if let Hypothesis::F { t , var } = self.hyps[sym.id as usize] {
-                opt_vars.insert(var);
+              if let Hypothesis::F(decl) = self.hyps[sym.id as usize] {
+                opt_vars.insert(decl.var);
               }
             }
             labels.push(sym.clone());
@@ -728,7 +756,7 @@ impl Parser {
     }
 
     let disjoint_vars = self.get_disjoint_vars(&mand_vars);
-    if self.is_valid_proof(&consequent, &hyps, &self.disjoint_vars, &labels, &proof) {
+    if self.is_valid_proof(&consequent, &hyps, &disjoint_vars, &labels, &proof) {
       let mut opt_disjoint_vars = Vec::<(u32, u32)>::new();
       for a in mand_vars.union(&opt_vars) {
         for b in opt_vars.iter() {
@@ -850,8 +878,8 @@ impl Parser {
               }
               // not mandatory -- we added mandatory at the beginning
               if sym.t == SymbolType::Hyp {
-                if let Hypothesis::F { t , var } = self.hyps[sym.id as usize] {
-                  opt_vars.insert(var);
+                if let Hypothesis::F (decl) = self.hyps[sym.id as usize] {
+                  opt_vars.insert(decl.var);
                 }
               }
               let id = depends.len() as u32;
@@ -954,7 +982,7 @@ impl Parser {
               }
             } else {
               self.sym_map.insert(symbol.clone(), Symbol { t: SymbolType::Var, id: id });
-              self.vars.push(Var { name: String::from_utf8(symbol.clone()).unwrap() });
+              self.vars.push(Var { name: String::from_utf8(symbol.clone()).unwrap(), t: 0 });
             }
             symbol.clear();
           }
@@ -1141,18 +1169,21 @@ impl Parser {
     }
   }
 
+  fn render_decl(&self, decl: &VarDecl) -> String {
+    return format!("$f {} {} $.",
+      self.consts[decl.t as usize].name, self.vars[decl.var as usize].name);
+  }
+
   fn render_hyp(&self, hyp: &Hypothesis) -> String {
-    let mut out = String::new();
     match hyp {
-      Hypothesis::F{ t, var } => {
-        out.push_str(format!("$f {} {} $.",
-          self.consts[*t as usize].name, self.vars[*var as usize].name).as_str());
+      Hypothesis::F(decl) => {
+        return format!("$f {} {} $.",
+          self.consts[decl.t as usize].name, self.vars[decl.var as usize].name);
       },
       Hypothesis::E(ss) => {
-        out.push_str(format!("$e {} $.", self.render_ss(ss)).as_str());
+        return format!("$e {} $.", self.render_ss(ss));
       },
     }
-    return out;
   }
 
   fn num_to_mm_enc(mut num: u32) -> String {
@@ -1168,6 +1199,114 @@ impl Parser {
     return String::from_utf8(buf).unwrap()
   }
 
+  fn print_assert(&self, assert: &Assertion) {
+    println!("${{");
+
+    // disjoints
+    for (a, b) in assert.disjoint_vars.iter() {
+      println!("\t$d {} {} $.", self.vars[*a as usize].name, self.vars[*b as usize].name);
+    }
+    for (a, b) in assert.opt_disjoint_vars.iter() {
+      println!("\t$d {} {} $.", self.vars[*a as usize].name, self.vars[*b as usize].name);
+    }
+
+    // optional hypotheses
+    for (i, d) in assert.depends.iter().enumerate() {
+      match d.t {
+        SymbolType::Hyp => {
+          println!("\t{}.opt{} {}", assert.name, i, self.render_hyp(&self.hyps[d.id as usize]));
+        },
+        _ => continue,
+      }
+    }
+
+    println!("");
+
+    // hypotheses
+    for (i, hyp) in assert.hyps.iter().enumerate() {
+      println!("\t{}.h{} {}", assert.name, i, self.render_hyp(hyp));
+    }
+
+    if assert.is_axiom {
+      println!("\t{} $a {} $.", assert.name, self.render_ss(&assert.consequent));
+    } else {
+      println!("\t{} $p {} $=", assert.name, self.render_ss(&assert.consequent));
+
+      // depends
+      print!("\t(");
+      for (i, d) in assert.depends.iter().enumerate() {
+        match d.t {
+          SymbolType::Hyp => {
+            print!(" {}.opt{}", assert.name, i);
+          },
+          SymbolType::Assert => {
+            print!(" {}", self.asserts[d.id as usize].name);
+            
+          },
+          _ => panic!("invalid"),
+        }
+      }
+      println!(" )");
+
+      let hyps_len = assert.hyps.len() as u32;
+      let deps_len = assert.depends.len() as u32;
+
+      // Perform 'compression' for Metamath format.
+      // Only dependency statements that are referenced later
+      // should get a Z, and then reference numbers need to be renumbered
+      // to not include the unused intermediates.
+      let mut depended_on = Vec::<bool>::new();
+      for step in assert.proof.iter() {
+        match step {
+          ProofStep::Dep(id) => {
+            if assert.depends[*id as usize].t == SymbolType::Assert {
+              depended_on.push(false);
+            }
+          },
+          ProofStep::Saved(id) => {
+            depended_on[*id as usize] = true;
+          },
+          _ => {},
+        }
+      }
+      let mut saved_id_to_num = Vec::<u32>::new();
+      let mut dep_cnt = 0;
+      for dep in depended_on.iter() {
+        if *dep {
+          saved_id_to_num.push(dep_cnt + hyps_len + deps_len);
+          dep_cnt += 1;
+        } else {
+          saved_id_to_num.push(0);
+        }
+      }
+
+      // print proof itself
+      let mut assert_cnt = 0;
+      for step in assert.proof.iter() {
+        match step {
+          ProofStep::Hyp(id) => {
+            print!("{}", Parser::num_to_mm_enc(*id));
+          },
+          ProofStep::Dep(id) => {
+            print!("{}", Parser::num_to_mm_enc(*id + hyps_len));
+            if assert.depends[*id as usize].t == SymbolType::Assert {
+              if depended_on[assert_cnt] {
+                print!("Z");
+              }
+              assert_cnt += 1;
+            }
+          },
+          ProofStep::Saved(id) => {
+            print!("{}", Parser::num_to_mm_enc(saved_id_to_num[*id as usize]));
+          },
+        }
+      }
+
+      println!(" $.");
+    }
+    println!("$}}");
+  }
+
   fn print_mm(&self) {
     println!("$( constants $)");
     for c in self.consts.iter() {
@@ -1178,275 +1317,230 @@ impl Parser {
       println!("\t$v {} $.", v.name);
     }
     for assert in self.asserts.iter() {
-      println!("${{");
-      // disjoints
-      for (a, b) in assert.disjoint_vars.iter() {
-        println!("\t$d {} {} $.", self.vars[*a as usize].name, self.vars[*b as usize].name);
-      }
-      for (a, b) in assert.opt_disjoint_vars.iter() {
-        println!("\t$d {} {} $.", self.vars[*a as usize].name, self.vars[*b as usize].name);
-      }
-
-      println!("");
-
-      // optional hypotheses
-      for (i, d) in assert.depends.iter().enumerate() {
-        match d.t {
-          SymbolType::Hyp => {
-            println!("\t{}.opt{} {}", assert.name, i, self.render_hyp(&self.hyps[d.id as usize]));
-          },
-          _ => continue,
-        }
-      }
-
-      println!("");
-
-      // hypotheses
-      for (i, hyp) in assert.hyps.iter().enumerate() {
-        println!("\t{}.h{} {}", assert.name, i, self.render_hyp(hyp));
-      }
-
-      if assert.is_axiom {
-        println!("\t{} $a {} $.", assert.name, self.render_ss(&assert.consequent));
-      } else {
-        println!("\t{} $p {} $=", assert.name, self.render_ss(&assert.consequent));
-
-        // depends
-        print!("\t(");
-        for (i, d) in assert.depends.iter().enumerate() {
-          match d.t {
-            SymbolType::Hyp => {
-              print!(" {}.opt{}", assert.name, i);
-            },
-            SymbolType::Assert => {
-              print!(" {}", self.asserts[d.id as usize].name);
-              
-            },
-            _ => panic!("invalid"),
-          }
-        }
-        println!(" )");
-
-        let hyps_len = assert.hyps.len() as u32;
-        let deps_len = assert.depends.len() as u32;
-
-        let mut depended_on = Vec::<bool>::new();
-        for step in assert.proof.iter() {
-          match step {
-            ProofStep::Dep(id) => {
-              if assert.depends[*id as usize].t == SymbolType::Assert {
-                depended_on.push(false);
-              }
-            },
-            ProofStep::Saved(id) => {
-              depended_on[*id as usize] = true;
-            },
-            _ => {},
-          }
-        }
-        let mut saved_id_to_num = Vec::<u32>::new();
-        let mut dep_cnt = 0;
-        for dep in depended_on.iter() {
-          if *dep {
-            saved_id_to_num.push(dep_cnt + hyps_len + deps_len);
-            dep_cnt += 1;
-          } else {
-            saved_id_to_num.push(0);
-          }
-        }
-
-
-        let mut assert_cnt = 0;
-        for step in assert.proof.iter() {
-          match step {
-            ProofStep::Hyp(id) => {
-              print!("{}", Parser::num_to_mm_enc(*id));
-            },
-            ProofStep::Dep(id) => {
-              print!("{}", Parser::num_to_mm_enc(*id + hyps_len));
-              if assert.depends[*id as usize].t == SymbolType::Assert {
-                if depended_on[assert_cnt] {
-                  print!("Z");
-                }
-                assert_cnt += 1;
-              }
-            },
-            ProofStep::Saved(id) => {
-              print!("{}", Parser::num_to_mm_enc(saved_id_to_num[*id as usize]));
-            },
-          }
-        }
-
-        println!(" $.");
-      }
-      println!("$}}");
+      self.print_assert(assert);
     }
   }
 
 
-  // fn integrate(&self, proof: &mut Vec<ProofStep>, formulas: &mut HashMap<SymStr, u32>) {
-  //   let mut stack = Vec::<SymStr>::new();
-  //   let mut stack_starts = Vec::<u32>::new();
-  //   // let mut formulas = Vec::<SymStr>::new();
-  //   let mut steps = Vec::<StepData>::new();
+  /**Make a proof an axiom. The structure of this will be:
+   * 1) The hypotheses, in the order that they appear
+   * 2) A single dependency, which will be the axiom.
+   * This is called `identity_proof` because it produces that is the same.
+   */
+  fn identity_proof(&self, assert: &Assertion) -> Vec<ProofStep> {
+    let mut proof = Vec::<ProofStep>::new();
+    for (i, h) in assert.hyps.iter().enumerate() {
+      proof.push(ProofStep::Hyp(i as u32));
+    }
+    proof.push(ProofStep::Dep(0));
+    return proof;
+  }
 
-  //   for (i, step) in proof.iter().enumerate() {
-  //     match step {
-  //       ProofStep::Hyp(id) => {
-  //         // println!("h");
-  //         let hyp = &hyps[*id as usize];
-  //         stack.push(hyp.to_ss());
-  //         stack_starts.push(i as u32);
-  //         steps.push(StepData { step_start: i, result: stack[stack.len()-1].clone() });
-  //       },
-  //       ProofStep::Dep(id) => {
-  //         // println!("d");
-  //         let sym = &deps[*id as usize];
-  //         match sym.t {
-  //           SymbolType::Hyp => {
-  //             let hyp = &self.hyps[sym.id as usize];
-  //             stack.push(hyp.to_ss());
-  //             stack_starts.push(i as u32);
-  //             steps.push(StepData { step_start: i as u32, result: stack[stack.len()-1].clone() });
-  //           },
-  //           SymbolType::Assert => {
-  //             let assert = &self.asserts[sym.id as usize];
-  //             let step_start = if assert.hyps.len() == 0 {
-  //               i
-  //             } else {
-  //               let hyps_start = stack.len() - assert.hyps.len();
-  //               stack_steps[hyps_start]
-  //             };
-  //             Parser::apply(&mut stack, assert, disjoint_vars);
-  //             stack_starts.push(step_start);
-  //             steps.push(StepData { step_start: step_start, result: stack[stack.len()-1].clone() });
-  //           },
-  //           _ => unreachable!(),
-  //         }
-  //         formulas.push(stack[stack.len()-1].clone());
-  //       },
-  //       ProofStep::Saved(id) => {
-  //         let st = saved_statements[*id as usize].clone();
-  //         // println!("<saved statement {}>", self.render_ss(&st));
-  //         stack.push(st);
-  //         stack_starts.push(i as u32);
-  //         steps.push(StepData { step_start: i as u32, result: stack[stack.len()-1].clone() });
-  //       },
-  //     }
-  //   }
-  //   for i in (0..steps.len()).rev() {
-  //     // if this step is a dep, and I've seen it before, save it.
-  //     // if I've seen this ste
-      
-  //   }
-    
-  // }
+  /**Get a list of variables that variable var can be substituted with.
+   * These are the variables that are disjoint with everything that var is
+   * disjoint with.
+   */
+  fn substitutable_vars(&self, var: u32, vars: &Vec<VarDecl>, disjoint_vars: &HashSet<(u32, u32)>)
+  -> Vec<VarDecl> {
+    let mut disjoint_with = Vec::<u32>::new();
+    for (a, b) in disjoint_vars.iter() {
+      if *a == var {
+        disjoint_with.push(*b);
+      } else if *b == var {
+        disjoint_with.push(*a);
+      }
+    }
 
-  // fn canonicalize(&self, consequent: &SymStr, hyps: &Vec<Hypothesis>,
-  //     disjoint_vars: &HashSet<(u32, u32)>, deps: &Vec<Symbol>, proof: &Vec<ProofStep>) -> bool {
-  //   let mut stack = Vec::<SymStr>::new();
-  //   let mut saved_statements = Vec::<SymStr>::new();
+    let mut out = Vec::<VarDecl>::new();
+    for v in vars.iter() {
+      let mut is_disjoint = true;
+      for a in disjoint_with.iter() {
+        if *a <= v.var {
+          if disjoint_vars.get(&(*a, v.var)).is_none() {
+            is_disjoint = false;
+            break;
+          }
+        } else {
+          if disjoint_vars.get(&(v.var, *a)).is_none() {
+            is_disjoint = false;
+            break;
+          }
+        }
+      }
+      if is_disjoint {
+        out.push(v.clone());
+      }
+    }
+    return out;
+  }
 
-  //   let mut creations = HashMap::<SymStr, u32>::new();
+  /**OK -- so you can do a fancy thing to re-use existing variables, but probably this
+   * will be difficult.
+   */
+  fn create_random_assertion(&self, name: String, t: u32, num_steps: u32) -> Assertion {
+    // choose an assertion
+    // choose 
+    let mut t_to_asserts = HashMap::<u32, Vec<u32>>::new();
+    for (i, assert) in self.asserts.iter().enumerate() {
+      match t_to_asserts.get_mut(&assert.consequent.t) {
+        Some(&mut v) => v.push(i as u32),
+        None => { t_to_asserts.insert(assert.consequent.t, vec![i as u32]); },
+      }
+    }
+    let mut rng = rand::thread_rng();
+    let choices = t_to_asserts.get(&t).unwrap();
+    let base_id = rng.gen_range(0..choices.len());
+    let assert = self.asserts[base_id].clone();
 
-  //   for step in proof {
-  //     match step {
-  //       ProofStep::Hyp(id) => {
-  //         // println!("h");
-  //         let hyp = &hyps[*id as usize];
-  //         stack.push(hyp.to_ss());
-  //       },
-  //       ProofStep::Dep(id) => {
-  //         // println!("d");
-  //         if self.asserts[id as usize].is_axiom {
-  //           // fine
-  //         } else {
-  //           // we need to reduce.
-  //           // go backwards through the steps of the sub-proof.
-  //           // if the step exists, skip it and and all sub-steps,
-  //           // and instead it will become a saved step.
-  //         }
-  //         // let sym = &deps[*id as usize];
-  //         // match sym.t {
-  //         //   SymbolType::Hyp => {
-  //         //     let hyp = &self.hyps[sym.id as usize];
-  //         //     stack.push(hyp.to_ss());
-  //         //   },
-  //         //   SymbolType::Assert => {
-  //         //     let assert = &self.asserts[sym.id as usize];
-  //         //     Parser::apply(&mut stack, assert, disjoint_vars);
-  //         //   },
-  //         //   _ => unreachable!(),
-  //         // }
-  //       },
-  //       ProofStep::SaveDep(id) => {
-  //         // let sym = &deps[*id as usize];
-  //         // match sym.t {
-  //         //   SymbolType::Hyp => {
-  //         //     let hyp = &self.hyps[sym.id as usize];
-  //         //     stack.push(hyp.to_ss());
-  //         //   },
-  //         //   SymbolType::Assert => {
-  //         //     let assert = &self.asserts[sym.id as usize];
-  //         //     Parser::apply(&mut stack, assert, disjoint_vars);
-  //         //   },
-  //         //   _ => unreachable!(),
-  //         // }
-  //         // saved_statements.push(stack[stack.len()-1].clone());
-  //       },
-  //       ProofStep::Saved(id) => {
-  //         let st = saved_statements[*id as usize].clone();
-  //         // println!("<saved statement {}>", self.render_ss(&st));
-  //         stack.push(st);
+    if assert.is_axiom {
+      assert.is_axiom = false;
+      assert.deps = vec![Symbol { t: SymbolType::Assert, id: base_id }];
+      assert.proof = self.identity_proof(&self.asserts[base_id]);
+    }
+
+    // choose a floating hypothesis
+    let mut to_substitute_vars = VecDeque::new();
+    let mut all_vars = Vec::new();
+    for hyp in assert.hyps.iter() {
+      if let Some(Hypothesis::F(decl)) = hyp {
+        to_substitute_vars.push_back(decl.clone());
+        all_vars.push(decl.clone())
+      }
+    }
+
+    if to_substitute_vars.len() == 0 {
+      // Can't substitute if there are no variables to substitute!
+      panic!("invalid");
+    }
+
+    // assert id to dependency id
+    let assert_to_dep = HashMap::<u32, u32>::new();
+    for (dep_id, assert_id) in assert.deps.iter().enumerate() {
+      assert_to_dep.insert(assert_id, dep_id as u32):
+    }
+
+    let mut disjoint_vars = HashSet::<(u32, u32)>::new();
+    for (a, b) in assert.disjoint_vars {
+      disjoint_vars.insert((a, b));
+    }
+    for (a, b) in assert.opt_disjoint_vars {
+      disjoint_vars.insert((a, b));
+    }
+
+    for step in 0..num_steps {
+      let to_substitute = to_substitute_vars.pop_front();
+      let choices = t_to_assert.get(to_substitute.t).unwrap();
+      let choice_id = rng.gen_range(0..choices.len());
+      let choice = self.asserts[choices[choice_id]];
+      println!("$( choosing random assertion $)");
+      self.print_assert(&choice);
+      panic!("unimplemented");
+
+      // We would need to check that we aren't introducing a circular
+      // dependency with this. However, we probably don't have to implement
+      // this
+      if !choice.is_axiom {
+        panic!("unimplemented");
+      }
+
+      // get dependency or add it
+      let dep_id = match assert_to_dep.get(choice_id) {
+        Some(dep_id) => *dep_id,
+        None => {
+          let dep_id = assert.deps.len();
+          assert.deps.push(choice_id);
+          dep_id
+        },
+      };
+
+      // floating hypotheses of the chosen assertion
+      let mut choice_floating = Vec::new();
+      for hyp in choice.hyps.iter() {
+        if let Some(Hypothesis::F(_)) = hyp {
+          choice_floating.push_back(hyp.clone());
+        }
+      }
+
+      let mut floating_proof_steps = Vec::new();
+      // floating_proof_steps.push(ProofStep::Hyp(...));
+
+      if choice_floating.len() != 0 {
+        // easy
+        let svars = self.substitutable_vars(to_substitute.var, &vars, &disjoint_vars);
+        svars.shuffle(&mut rng);
+        for i in 0..choice_floating.len() {
           
-  //       },
-  //     }
-  //   }
+        }
+      }
+      // else if choice_floating.len() == 1 {
+      //   // NOTE: this doesn't work, as it doesn't check the variable types!
+      //   panic!("UNIMPLEMENTED");
+      //   floating_proof_steps.push(ProofStep::Hyp(XXX));
+      //   // medium
+      // } else {
+      //   let svars = self.substitutable_vars(to_substitute_var, vars, disjoint_vars);
+      //   svars.shuffle(&mut rng);
+      //   for i in choice_floating.len()
+      //   // hard!
+      // }
 
-  //   // check that top of stack matches consequent
-  //   if stack.len() != 1 {
-  //     println!("stack.len(): {}", stack.len());
-  //     panic!("invalid");
-  //     return false;
-  //   }
-  //   // check that top of stack is same as assertion, then create assertion
-  //   if consequent.syms.len() != stack[0].syms.len() {
-  //     panic!("invalid");
-  //     return false;
-  //   }
-  //   if consequent.t != stack[0].t {
-  //     panic!("invalid");
-  //     return false;
-  //   }
-  //   for i in 0..consequent.syms.len() {
-  //     if consequent.syms[i] != stack[0].syms[i] {
-  //       panic!("invalid");
-  //       return false;
-  //     }
-  //   }
-  //   return true;
-  // }
+      // rewrite proof
+      let mut new_proof = Vec::<ProofStep>::new();
+      let mut old_to_new_saved = Vec::<u32>::new();
+      let mut dep_cnt = 0;
+      let mut inserted_step = None;
+      for step in assert.proof {
+        match step {
+          Hyp(id) => {
+            if let Some(saved_id) = inserted_step {
+              new_proof.push(ProofStep::Saved(saved_id));
+            } else {
+              // TODO: insert floating
+              for new_step in floating_proof_steps {
+                new_proof.push(new_step);
+              }
+              new_proof.push(ProofStep::Dep(dep_id));
+              inserted_step = Some(dep_cnt);
+              dep_cnt += 1;
+            }
+          },
+          ProofStep::Dep(_) => {
+            new_proof.push(step);
+            old_to_new_saved.push(dep_cnt);
+            dep_cnt += 1;
+          },
+          ProofStep::Saved(id) => {
+            new_proof.push(ProofStep::Saved(old_to_new_saved[id]));
+          }
+        }
+      }
+      assert.proof = new_proof;
 
-  fn canonicalize_proofs(&mut self) {
-    for assert in self.asserts.iter() {
-      // go through the proof. If 
-      
+
+      // if choice has one floating hypothesis, substitute it for itself.
+      // i.e., if the assert is $a type ... X ... $.
+
+      // first: add new hypotheses, if necessary. 
+      // substitute choice, ensuring that it preserves distinct
+      // first instance of hyp(id) gets replaced by 
+      // choice hyps then dep of new assertion.
+      // later instances of hyp(id) get replaced with dep pointing
+      // to first construction.
+
+      // to_substitute_vars.push_back(...);
     }
+
+    // return Assertion {
+    //   name,
+    //   is_axiom: False,
+    //   hyps: ,
+    //   disjoint_vars: ,
+    //   consequent: ,
+    //   depends: ,
+    //   opt_disjoint_vars: ,
+    //   proof: ,
+    // };
   }
-  // fn create_random_assertion(&self, name: String, num_steps: u32) -> Assertion {
-  //   // choose an assertion
-  //   // choose 
-  //   return Assertion {
-  //     name,
-  //     is_axiom: False,
-  //     hyps: ,
-  //     disjoint_vars: ,
-  //     consequent: ,
-  //     depends: ,
-  //     opt_disjoint_vars: ,
-  //     proof: ,
-  //   };
-  // }
 
   fn get_assert_types(&self) {
     let mut types = HashSet::<u32>::new();
@@ -1454,7 +1548,7 @@ impl Parser {
       types.insert(assert.consequent.t);
     }
     for id in types.iter() {
-      println!("{}", self.consts[*id as usize].name);
+      println!("{} ({})", self.consts[*id as usize].name, id);
     }
   }
 }
@@ -1472,5 +1566,12 @@ fn main() {
   // parser.display_asserts();
   // parser.print_mm();
   parser.get_assert_types();
+
+  // let mut rng = rand::thread_rng();
+  // let choices = t_to_assert.get(t).unwrap();
+  // let base_id = rng.gen_range(0..parser.asserts.len());
+  // let assert = &parser.asserts[base_id];
+  // parser.create_random_assertion(String::new("xyz"), )
+
   // println!("success!");
 }
