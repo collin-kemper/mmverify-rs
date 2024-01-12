@@ -71,13 +71,6 @@ pub enum ProofStep {
   Saved(u32),
 }
 
-// This is more thorough data about the mechanics of a proof step.
-// struct StepData {
-//   start_step: u32,
-//   result: SymStr,
-//   // what I did
-// }
-
 #[derive(Clone)]
 struct Assertion {
   name: String,
@@ -89,7 +82,6 @@ struct Assertion {
   consequent: SymStr,
 
   deps: Vec<Symbol>,
-  // opt_disjoint_vars: Vec<(u32, u32)>, // needed for proof
   proof: Vec<ProofStep>,
 }
 
@@ -116,6 +108,115 @@ struct Const {
   name: String,
 }
 
+struct ProofNode {
+  data: ProofStep,
+}
+
+struct ProofGraph {
+  nodes: Vec<ProofNode>,
+  root: usize,
+  edges: Vec<Vec<usize>>,
+}
+
+impl ProofGraph {
+  fn add_node(&mut self, node: ProofNode) -> usize {
+    let node_id = self.nodes.len();
+    self.nodes.push(node);
+    self.edges.push(vec![]);
+    return node_id;
+  }
+
+  fn add_node_with_edges(&mut self, node: ProofNode, dsts: &[usize]) -> usize {
+    let node_id = self.nodes.len();
+    self.nodes.push(node);
+    self.edges.push(dsts.to_vec());
+    return node_id;
+  }
+
+  fn from_theorem(mmdb: &MmDb, theorem: &Assertion) -> ProofGraph {
+    let mut graph = ProofGraph {
+      nodes: vec![],
+      root: 0,
+      edges: vec![],
+    };
+
+    let mut stack = Vec::<usize>::new();
+    let mut steps = Vec::<usize>::new();
+    for step in theorem.proof.iter() {
+      match step {
+        ProofStep::Hyp(id) => {
+          let node_id = graph.add_node(ProofNode { data: step.clone() });
+          stack.push(node_id);
+          steps.push(node_id);
+        },
+        ProofStep::Dep(id) => {
+          let sym = &theorem.deps[*id as usize];
+          match sym.t {
+            SymbolType::Hyp => {
+              let node_id = graph.add_node(ProofNode { data: step.clone() });
+              stack.push(node_id);
+              steps.push(node_id);
+            },
+            SymbolType::Assert => {
+              let assert = &mmdb.asserts[sym.id as usize];
+              if assert.hyps.len() > stack.len() {
+                panic!("invalid");
+              }
+              let hyps_start = stack.len() - assert.hyps.len();
+              let node_id = graph.add_node_with_edges(
+                ProofNode { data: step.clone() },
+                &stack[hyps_start..]
+              );
+              stack.truncate(hyps_start);
+              stack.push(node_id);
+              steps.push(node_id);
+            },
+            _ => panic!("invalid"),
+          }
+        },
+        ProofStep::Saved(step) => {
+          let node_id = steps[*step as usize];
+          stack.push(node_id);
+          steps.push(node_id);
+        },
+      }
+    }
+    graph.root = stack[stack.len()-1];
+    return graph;
+  }
+
+  fn to_proof(&self) -> Vec<ProofStep> {
+    let mut visited = vec![false; self.nodes.len()];
+    let mut node_to_step = vec![0; self.nodes.len()];
+    let mut stack = vec![(0, self.root)];
+    let mut proof = Vec::<ProofStep>::new();
+    // reverse topological visit
+    while let Some((child_num, node)) = stack.pop() {
+      if child_num < self.edges[node].len() {
+        stack.push((child_num+1, node));
+        let child_id = self.edges[node][child_num];
+        if !visited[child_id] {
+          stack.push((0, child_id));
+        } else {
+          proof.push(ProofStep::Saved(node_to_step[child_id]));
+        }
+      } else {
+        visited[node] = true;
+        node_to_step[node] = proof.len() as u32;
+        match self.nodes[node].data {
+          ProofStep::Hyp(id) => proof.push(ProofStep::Hyp(id)),
+          ProofStep::Dep(id) => proof.push(ProofStep::Dep(id)),
+          _ => panic!("invalid"),
+        }
+      }
+    }
+
+    return proof;
+  }
+}
+
+/**Metamath database.
+ */
 pub struct MmDb {
   pub vars: Vec<Var>,
   pub consts: Vec<Const>,
@@ -132,6 +233,11 @@ impl MmDb {
       asserts: Vec::new(),
     }
   }
+
+  fn get_assert<'a>(&'a self, id: u32) -> &'a Assertion {
+    return &self.asserts[id as usize];
+  }
+
   pub fn add_const(&mut self, name: String) -> u32 {
     let id = self.consts.len() as u32;
     self.consts.push(Const { name: name });
@@ -336,8 +442,6 @@ impl MmDb {
     stack.push(consequent);
   }
 
-  
-
   /**NOTE: this 'should' return bool, but it is a lot easier to trace and debug stuff
    * if you just panic.
    */
@@ -352,6 +456,7 @@ impl MmDb {
     let mut saved_statements = Vec::<SymStr>::new();
     let mand_vars = theorem.get_mand_var_set();
 
+    let mut i = 0;
     for step in theorem.proof.iter() {
       match step {
         ProofStep::Hyp(id) => {
@@ -368,7 +473,6 @@ impl MmDb {
             SymbolType::Assert => {
               let assert = &self.asserts[sym.id as usize];
               MmDb::apply(&mut stack, assert, &mand_vars, &disjoint_var_set);
-              saved_statements.push(stack[stack.len()-1].clone());
             },
             _ => panic!("invalid"),
           }
@@ -378,6 +482,7 @@ impl MmDb {
           stack.push(st);
         },
       }
+      saved_statements.push(stack[stack.len()-1].clone());
     }
 
     // check that top of stack matches consequent
@@ -397,6 +502,311 @@ impl MmDb {
       }
     }
     return;
+  }
+
+
+  /**Unfolding a dependency in an assertion will remove all references
+   * to that dependency in the proof and will replace them with an inlined
+   * proof of the dependency.
+   */
+  fn unfold(&self, name: String, thm: &Assertion, dep_id: u32) -> Assertion {
+    panic!("unimplemented");
+    // if thm.is_axiom {
+    //   panic!("invalid");
+    // }
+    // let to_unfold_sym = thm.deps[dep_id as usize];
+
+    // if to_unfold_sym.t != SymbolType:Assert
+    // || self.asserts[to_unfold_sym.id as usize].is_axiom {
+    //   // cannot unfold a hypothesis (which must be a floating hypothesis)
+    //   // cannot unfold an axiom
+    //   // alternately: unfolding an axiom is a trivial operation
+    //   let out = thm.clone();
+    //   out.name = name;
+    //   return out;
+    // }
+
+    // // sanity check
+    // let mut contains_dep = false;
+    // for sep in thm.proof.iter() {
+    //   match step {
+    //     ProofStep::Dep(id) => {
+    //       if *id == dep_id {
+    //         contains_dep = true;
+    //         break;
+    //       }
+    //     },
+    //     _ => continue,
+    //   }
+    // }
+    // if !contains_dep {
+    //   panic!("invalid");
+    // }
+
+    // let to_unfold = &self.asserts[to_unfold_sym.id as usize];
+
+    // // create new dep vector that excludes the dependency we are unfolding.
+    // let mut deps = Vec::<Symbol>::with_capacity(thm.deps.len());
+    // deps.extend_from_slice(&thm.deps[0..(dep_id as usize)]);
+    // deps.extend_from_slice(&thm.deps[(dep_id as usize + 1)..]);
+
+    // // this maps the dependency id in to_unfold to its new dependency
+    // // id in the new assertion.
+    // let mut to_unfold_dep_map = Vec::<u32>::new();
+
+    // for dep in to_unfold.deps.iter() {
+    //   //  todo: add new deps
+    //   let mut already_contains = false;
+    //   let mut dep_ind = deps.len();
+    //   for (i, dep0) in deps.iter().enumerate() {
+    //     if *dep == *dep0 {
+    //       dep_ind = i;
+    //       break;
+    //     }
+    //   }
+    //   if dep_ind >= deps.len() {
+    //     // push new dependency
+    //     deps.push(dep.clone());
+        
+    //   }
+    //   to_unfold_dep_map.push(dep_ind);
+    // }
+
+
+    // // whenever we push a hypothesis of to_unfold, we must replace this with
+    // // the constructed hypothesis in thm....
+    // // otherwise, everything else can be the same (module remapping ids).
+    // // 
+    // let mut stack = Vec::<(ProofStep, u32, u32)>::new()
+    // // let mut saved_statements = Vec::<SymStr>::new();
+    // let mut saved_statement_cnt = 0;
+
+    // let mut proof = Vec::<ProofStep>::new();
+    // // maps old saved id to new saved id
+    // let mut saved_map = Vec::<u32>::new();
+    // for step in thm.proof.iter() {
+    //   match step {
+    //     ProofStep::Hyp(id) => {
+    //       proof.push(step.clone());
+    //       stack.push(step.clone());
+    //     },
+    //     ProofStep::Dep(id) => {
+    //       let sym = &theorem.deps[*id as usize];
+    //       match sym.t {
+    //         SymbolType::Hyp => {
+    //           if *id > dep_id {
+    //             proof.push(ProofStep::Dep(*id - 1));
+    //             stack.push(ProofStep::Dep(*id - 1));
+    //           } else {
+    //             proof.push(ProofStep::Dep(*id));
+    //             stack.push(ProofStep::Dep(*id));
+    //           }
+    //           // let hyp = &self.hyps[sym.id as usize];
+    //           // stack.push(hyp.to_ss());
+    //         },
+    //         SymbolType::Assert => {
+    //           let assert = &self.asserts[sym.id as usize];
+    //           if *id < dep_id {
+    //             if assert.hyps.len() > stack.len() {
+    //               panic!("invalid");
+    //             }
+    //             let new_stack_sz = stack.len() - assert.hyps.len();
+    //             stack.truncate(new_stack_sz);
+    //             proof.push(step.clone());
+    //             stack.push(step.clone());
+    //             // we will be adding a bunch of saved statements, so 
+    //             // we need to remap the ids of these
+    //             saved_map.push(saved_statement_cnt);
+    //             saved_statement_cnt += 1;
+    //           } else if *id == dep_id {
+    //             /* unfold the to_unfold dependency */
+
+    //             // first, get the replacements for the hypotheses of the dependency
+    //             let mut hyp_replacements = Vec::<ProofStep>::new();
+    //             let hyp_start = stack.len() - assert.hyps.len();
+    //             for i in 0..assert.hyps.len() {
+    //               match stack[hyp_start + i] {
+    //                 ProofStep::Hyp(id) => {
+    //                   // hypotheses replace hypotheses
+    //                   hyp_replacements.push(ProofStep::Hyp(id));
+    //                 },
+    //                 ProofStep::Dep(id) => {
+    //                   // references to the dependency replace dependencies
+    //                   hyp_replacements.push(ProofStep::Saved(TODO));
+    //                 },
+    //                 ProofStep::Saved(id) => {
+    //                   // saved statements replace saved statements
+    //                   hyp_replacements.push(ProofStep::Saved(id));
+    //                 },
+    //               }
+    //             }
+
+    //             let saved_offset = saved_statement_cnt;
+    //             for step in assert.proof.iter() {
+    //               match step {
+    //                 ProofStep::Hyp(id) => {
+    //                   proof.push(hyp_replacements[*id as usize]);
+    //                   stack.push(hyp_replacements[*id as usize])
+    //                 },
+    //                 ProofStep::Dep(id) => {
+    //                   let sym = &theorem.deps[*id as usize];
+    //                   match sym.t {
+    //                     SymbolType::Hyp => {
+    //                       // TODO
+    //                     },
+    //                     SymbolTYpe::Assert => {
+    //                       // TODO?
+    //                       let assert = &self.asserts[sym.id as usize];
+    //                       if assert.hyps.len() > stack.len() {
+    //                         panic!("invalid");
+    //                       }
+    //                       let new_stack_sz = stack.len() - assert.hyps.len();
+    //                       stack.truncate(new_stack_sz);
+    //                       proof.push(
+    //                         ProofStep::Dep(to_unfold_dep_map[*id as usize]));
+    //                       stack.push(
+    //                         ProofStep::Dep(to_unfold_dep_map[*id as usize]));
+    //                       saved_statement_cnt += 1;
+    //                     },
+    //                     _ => panic!(),
+    //                   }
+    //                 },
+    //                 ProofStep::Saved(id) => {
+    //                   proof.push(ProofStep::Saved(saved_offset + id));
+    //                   stack.push(ProofStep::Saved(saved_offset + id));
+    //                 },
+    //               }
+    //             }
+                
+    //           } else { /* *id > dep_id */
+    //             if assert.hyps.len() > stack.len() {
+    //               panic!("invalid");
+    //             }
+    //             let new_stack_sz = stack.len() - assert.hyps.len();
+    //             stack.truncate(new_stack_sz);
+    //             proof.push(ProofStep::Dep(*id - 1));
+    //             stack.push(ProofStep::Dep(*id - 1));
+    //             // we will be adding a bunch of saved statements, so 
+    //             // we need to remap the ids of these
+    //             saved_map.push(saved_statement_cnt);
+    //             saved_statement_cnt += 1;
+    //           }
+    //           // MmDb::apply(&mut stack, assert, &mand_vars, &disjoint_var_set);
+    //           // saved_statements.push(stack[stack.len()-1].clone());
+    //         },
+    //         _ => panic!("invalid"),
+    //       }
+    //     },
+    //     ProofStep::Saved(id) => {
+    //       proof.push(ProofStep::Saved(saved_map[id]));
+    //     },
+    //   }
+    // }
+
+    // // normalize proof.
+
+    // // All references to hypotheses become hypotheses
+    // for step in proof.mut_iter() {
+    //   if let ProofStep::Saved(id) = &step {
+    //     match &proof[id as usize] {
+    //       ProofStep::Hyp(_) => step = proof[id].clone(),
+    //       ProofStep::Saved(id) => step = proof[id].clone(),
+    //       _ => continue,
+    //     }
+    //   }
+    // }
+
+    // // for every non top element of the stack,
+    // // replace the first saved reference to it with the proof steps.
+    // // Then replace all further saved references to it with references
+    // // to it at its new location.
+    // if stack.len() > 1 {
+    //   let out = whatever;
+    //   let mut queue = VecDeque::<node>::new();
+    //   queue.push_back(final step in proof);
+    //   while let Some(node) = queue.pop_front() {
+    //     for child in node {
+    //       queue.push_back(child);
+    //     }
+    //     if 
+    //   }
+    //   // TODO: remove unused parts of the proof.
+    //   let mut step_use_cnt = vec![0, proof.len()];
+    //   for (i, step) in proof.iter().enumerate() {
+    //     match step with {
+    //       ProofStep::Hyp(id) => {},
+    //       ProofStep::Dep(id) => {
+    //         match deps[id].t {
+    //           Symbol::Hyp => {},
+    //           Symbol::Assert => {
+    //             // the 
+    //           },
+    //           _ => panic!("invalid"),
+    //         }
+            
+    //       },
+    //       ProofStep::Saved(id) => {
+    //         step_use_cnd[id] += 1;
+    //       },
+          
+    //     }
+
+    //   }
+    //   let step_remap = vec![0, proof.len()];
+    //   for (i, step) in proof.iter().enumerate() {
+    //     match step with {
+    //       ProofStep::Hyp(id) => ,
+    //       ProofStep::Dep(id) => {
+            
+    //       },
+    //       ProofStep::Saved(id) => {
+    //         if !step_used[*id as usize] {
+    //           // saved step referenced before first use!
+    //           // go backwards, 
+
+
+    //           step_remap[id] = cur_step;
+    //         }
+    //       },
+          
+    //     }
+    //   }
+    //   for item in stack[0..stack.len()-1].iter() {
+    //     // ensure that it is redundant.
+    //   }
+
+    //   // Now, remove all redundant parts of the proof.
+    //   let mut reduced_proof = Vec::<ProofStep>::new();
+    //   let mut deleted_steps = 0;
+    //   for (i, step) in proof.drain().enumerate() {
+    //     if step_is_necessary[i] {
+    //       match step {
+    //         ProofStep::Hyp(id) => reduced_proof.push(step),
+    //         ProofStep::Dep(id) => reduced_proof.push(step),
+    //         ProofStep::Saved(id) => reduced_proof.push(
+    //           ProofStep::Saved(id - deleted_steps)
+    //         ),
+    //       } 
+    //     } else {
+    //       deleted_steps += 1;
+    //     }
+    //   }
+    //   proof = new_proof;
+    // }
+
+
+    // let mut step_referenced = vec![false; proof.len()];
+    // for step in &
+
+    // return Assertion {
+    //   name,
+    //   is_axiom: false,
+    //   hyps: thm.hyps.clone(),
+    //   disjoint_vars: thm.disjoint_vars.clone(),
+    //   consequent: thm.consequent.clone(),
+    //   deps,
+    //   proof,
+    // };
   }
 
   // Rendering functions
@@ -543,14 +953,11 @@ impl MmDb {
       // Only dependency statements that are referenced later
       // should get a Z, and then reference numbers need to be renumbered
       // to not include the unused intermediates.
-      let mut depended_on = Vec::<bool>::new();
+      // NOTE: not doing this resulted in weird failures to verify previously
+      // that I don't entirely understand.
+      let mut depended_on = vec![false; assert.proof.len()];
       for step in assert.proof.iter() {
         match step {
-          ProofStep::Dep(id) => {
-            if assert.deps[*id as usize].t == SymbolType::Assert {
-              depended_on.push(false);
-            }
-          },
           ProofStep::Saved(id) => {
             depended_on[*id as usize] = true;
           },
@@ -569,8 +976,7 @@ impl MmDb {
       }
 
       // print proof itself
-      let mut assert_cnt = 0;
-      for step in assert.proof.iter() {
+      for (i, step) in assert.proof.iter().enumerate() {
         match step {
           ProofStep::Hyp(id) => {
             print!("{}", MmDb::num_to_mm_enc(*id));
@@ -578,15 +984,14 @@ impl MmDb {
           ProofStep::Dep(id) => {
             print!("{}", MmDb::num_to_mm_enc(*id + hyps_len));
             if assert.deps[*id as usize].t == SymbolType::Assert {
-              if depended_on[assert_cnt] {
-                print!("Z");
-              }
-              assert_cnt += 1;
             }
           },
           ProofStep::Saved(id) => {
             print!("{}", MmDb::num_to_mm_enc(saved_id_to_num[*id as usize]));
           },
+        }
+        if depended_on[i] {
+          print!("Z");
         }
       }
 
@@ -616,6 +1021,26 @@ impl MmDb {
     }
     for id in types.iter() {
       println!("{} ({})", self.consts[*id as usize].name, id);
+    }
+  }
+
+  /**used to test that the ProofGraph from_theorem and to_theorem work
+   */
+  pub fn test_proof_graph(&self) {
+    for assert in self.asserts.iter() {
+      if !assert.is_axiom {
+        let mut graph = ProofGraph::from_theorem(self, assert);
+        let proof = graph.to_proof();
+        let theorem = Assertion {
+          name: assert.name.clone(),
+          is_axiom: false, hyps: assert.hyps.clone(),
+          disjoint_vars: assert.disjoint_vars.clone(),
+          consequent: assert.consequent.clone(),
+          deps: assert.deps.clone(),
+          proof: proof
+        };
+        self.check_proof_validity(&theorem);
+      }
     }
   }
 }

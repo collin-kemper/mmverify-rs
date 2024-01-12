@@ -394,7 +394,7 @@ impl Parser {
     // construct proof
     let mut proof = Vec::<ProofStep>::new();
     let mut saved_inds = Vec::<u32>::new();
-    let mut saved_statement_count = 0;
+    let mut statement_count = 0;
     let mut num: usize = 0;
     loop {
       let tok = self.r.next();
@@ -409,6 +409,7 @@ impl Parser {
           if num < hyps.len() {
             proof.push(ProofStep::Hyp(num as u32));
 
+            statement_count += 1;
             num = 0;
             continue;
           }
@@ -417,20 +418,19 @@ impl Parser {
           num -= hyps.len();
           if num < deps.len() {
             proof.push(ProofStep::Dep(num as u32));
-            if deps[num].t == SymbolType::Assert {
-              saved_statement_count += 1;
-            }
 
+            statement_count += 1;
             num = 0;
             continue;
           }
 
           // saved statement
           num -= deps.len();
-          if num < saved_statement_count {
+          if num < saved_inds.len() {
             // println!("saved {} ({})", num, saved_inds[num]);
             proof.push(ProofStep::Saved(saved_inds[num]));
 
+            statement_count += 1;
             num = 0;
             continue;
           }
@@ -446,7 +446,7 @@ impl Parser {
           if proof.len() == 0 {
             panic!("invalid");
           }
-          saved_inds.push((saved_statement_count - 1) as u32);
+          saved_inds.push((statement_count - 1) as u32);
         },
         _ => panic!("invalid"),
       }
